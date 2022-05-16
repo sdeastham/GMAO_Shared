@@ -1070,7 +1070,7 @@ CONTAINS
 !
   subroutine  dyn_put ( fname, nymd, nhms, prec, w_f, rc, &
                         nstep, verbose, new, freq, epv, plevs, vectype, forceflip,&  ! optional
-                        only_vars, indxlevs                                       )  ! optional
+                        only_vars, indxlevs, skip_setvec                          )  ! optional
 !
 ! !USES:
 !
@@ -1102,6 +1102,7 @@ CONTAINS
   integer, intent(in), OPTIONAL     :: vectype  ! switch between g4/g5 dyn-vects
   logical, intent(in), OPTIONAL     :: forceflip! allows flip of data%fields only
   logical, intent(in), OPTIONAL     :: indxlevs ! place lev index instead of pressure levs in file
+  logical, intent(in), OPTIONAL     :: skip_setvec ! skip set of meta-data - typically because user sets its own
   character(len=*), intent(in), OPTIONAL :: only_vars(:) ! write out only these fields
 
 !
@@ -1135,6 +1136,7 @@ CONTAINS
 !  16Jan2010 Todling   Add forceflip here as already in the read
 !  23Jun2010 Kokron    Initialize fliplon to .false.
 !  08May2018 Todling   Allow for lev-index to be in file (MAPL only handles indx)
+!  20Jun2020 Todling   Allow for user-set of specs
 !
 !EOP
 !-------------------------------------------------------------------------
@@ -1154,6 +1156,7 @@ CONTAINS
    integer :: fid, err, next
 
    logical verb, creating, fexists, fliplon
+   logical do_setvec
 
    integer, parameter :: READ_WRITE = 0
 
@@ -1262,7 +1265,13 @@ CONTAINS
 
 !  Allow reset of variable names
 !  -----------------------------
-   call dyn_setvectyp_ ( rc, w_f, vectype=vectype_ )
+   do_setvec=.true.
+   if(present(skip_setvec)) then
+      if(skip_setvec) do_setvec=.false.
+   endif
+   if(do_setvec) then
+     call dyn_setvectyp_ ( rc, w_f, vectype=vectype_ )
+   endif
 
 !  Setup variable information
 !  --------------------------
@@ -1349,7 +1358,7 @@ CONTAINS
    if ( present(plevs) ) then
       vname(next)  = 'slp'
       vtitle(next) = 'Sea level pressure'
-      vunits(next) = 'hPa'
+      vunits(next) = 'Pa'
       kmvar(next)  = 0
    else
       vname(next)  = w_f%psm%name
@@ -1758,7 +1767,7 @@ CONTAINS
 !
   subroutine  dyn_get ( fname, nymd, nhms, w_f, rc, &
                         nstep, timidx, freq, skipSPHU, vectype, forceflip, & ! optional
-                        ncf, pncf )                                          ! optional
+                        ncf, pncf, xtrnames )                                ! optional
 !
 ! !USES:
 !
@@ -1773,6 +1782,7 @@ CONTAINS
   logical, OPTIONAL, intent(in)     :: skipSPHU ! if true, does not read SPHU
   integer, OPTIONAL, intent(in)     :: vectype  ! dyn-vector type (g4 or g5)
   logical, OPTIONAL, intent(in)     :: forceflip! flip fields at user's request
+  character(len=*), OPTIONAL, intent(in), pointer :: xtrnames(:) ! name of addition tracers
 
 !
 ! !INPUT/OUTPUT PARAMETERS:
@@ -1833,6 +1843,7 @@ CONTAINS
 !  06Mar2014 Todling   pncf knob to allow reading non-compliant perturbation file created by GSI
 !  16Oct2015 Todling   For too long now MAP-written files have upset m_dyn; patch fix
 !  01Oct2016 M.J. Kim  Add qi,ql,qr,qs to perturbation 
+!  20Jun2020 Todling   Allow for handling of additional named tracers
 !
 !EOP
 !-------------------------------------------------------------------------
@@ -1845,7 +1856,7 @@ CONTAINS
    real,    allocatable :: valid_range(:,:), packing_range(:,:)
    integer, allocatable :: kmvar(:), yyyymmdd(:), hhmmss(:)
 
-   integer :: im, jm, km, lm, nvars
+   integer :: im, jm, km, lm, nvars, nx, nxt
    integer :: l, timinc, lbeg, myvtype,i
    real    :: amiss
 
@@ -2220,8 +2231,19 @@ CONTAINS
 
 
    else ! .not. ncf/pncf
+      nxt=0; nx=0
+      if(present(xtrnames)) then
+         if(associated(xtrnames)) nxt=size(xtrnames)
+      endif
       do l = lbeg, lm
-           call GFIO_GetVar ( fid, w_f%qm(l)%name, nymd, nhms, &
+           fldname = trim(w_f%qm(l)%name)
+           if (nxt>0.and.fldname(1:6) == 'tracer') then
+              if (nx<=nxt) then
+                 nx=nx+1
+                 fldname = trim(xtrnames(nx))
+              endif
+            endif
+           call GFIO_GetVar ( fid, fldname, nymd, nhms, &
                               im, jm, 1, km, w_f%q(:,:,:,l), err )
             if ( l .eq. 2  .and.  err .eq. -40 ) then
                  rc = 1113 + l       ! variable not found.
@@ -2231,6 +2253,7 @@ CONTAINS
                  w_f%q(:,:,:,l) = 0.0 ! for backward compatibility, if cloud fields not found, no problem
             end if
             if ( fliplon ) call hflip_ ( w_f%q(:,:,:,l),im,jm,km )
+            if(nxt>0.and.nx==nxt) exit
        end do
     end if ! ncf/pncf
 
@@ -2352,19 +2375,25 @@ CONTAINS
 
   end subroutine get_lwi_
 
-  subroutine  Dyn_Flip ( w_f )
+  subroutine  Dyn_Flip ( w_f, dover )
 
   implicit none
 
   type(dyn_vect),intent(inout)  :: w_f
+  logical, optional, intent(in) :: dover
  
   integer im,jm,km
   integer i,L
   real,allocatable:: dum(:)
+  logical :: dover_
 
   im=w_f%grid%im
   jm=w_f%grid%jm
   km=w_f%grid%km
+  dover_ = .true.
+  if(present(dover)) then
+    dover_ = dover
+  endif
 
   if(associated(w_f%phis))      call hflip_(w_f%phis     , im, jm)
   if(associated(w_f%hs_stdv))   call hflip_(w_f%hs_stdv  , im, jm)
@@ -2379,25 +2408,25 @@ CONTAINS
   if(associated(w_f%ps)) call hflip_(w_f%ps, im, jm)
 
   if(associated(w_f%delp)) then
-     call hflip_(w_f%delp, im, jm, km)
-     call vflip_(w_f%delp, im, jm, km)
+                call hflip_(w_f%delp, im, jm, km)
+     if(dover_) call vflip_(w_f%delp, im, jm, km)
   endif
   if(associated(w_f%u)) then
-      call hflip_(w_f%u   , im, jm, km)
-      call vflip_(w_f%u   , im, jm, km)
+                 call hflip_(w_f%u   , im, jm, km)
+      if(dover_) call vflip_(w_f%u   , im, jm, km)
   endif
   if(associated(w_f%v)) then
-      call hflip_(w_f%v   , im, jm, km)
-      call vflip_(w_f%v   , im, jm, km)
+                 call hflip_(w_f%v   , im, jm, km)
+      if(dover_) call vflip_(w_f%v   , im, jm, km)
   endif
   if(associated(w_f%pt)) then
-     call hflip_(w_f%pt  , im, jm, km)
-     call vflip_(w_f%pt  , im, jm, km)
+                call hflip_(w_f%pt  , im, jm, km)
+     if(dover_) call vflip_(w_f%pt  , im, jm, km)
   endif
   if(associated(w_f%q)) then
      do L=1,size(w_f%q,4)
-        call hflip_(w_f%q(:,:,:,L), im, jm, km)
-        call vflip_(w_f%q(:,:,:,L), im, jm, km)
+                   call hflip_(w_f%q(:,:,:,L), im, jm, km)
+        if(dover_) call vflip_(w_f%q(:,:,:,L), im, jm, km)
      enddo
   endif
 
@@ -2409,12 +2438,14 @@ CONTAINS
   w_f%grid%lon=dum
   deallocate(dum)
 
-  allocate(dum(km+1))
-  dum=w_f%grid%ak
-  w_f%grid%ak(:)=dum(km+1:1:-1)
-  dum=w_f%grid%bk
-  w_f%grid%bk(:)=dum(km+1:1:-1)
-  deallocate(dum)
+  if (dover_) then
+     allocate(dum(km+1))
+     dum=w_f%grid%ak
+     w_f%grid%ak(:)=dum(km+1:1:-1)
+     dum=w_f%grid%bk
+     w_f%grid%bk(:)=dum(km+1:1:-1)
+     deallocate(dum)
+  endif
 
   end subroutine Dyn_Flip
 
